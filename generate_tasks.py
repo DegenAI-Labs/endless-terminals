@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 
 from generator.task_template_gen import generate_templates_batch
+from generator.local_only import text_suggests_external_network
 from generator.initial_state_test_gen import generate_test_templates_batch as generate_initial_tests_batch
 from generator.apptainer_def_gen import iterate_def_template_batch
 from generator.completion_test_gen import generate_test_templates_batch as generate_final_tests_batch
@@ -60,6 +61,11 @@ def _build_sif(def_path: Path, sif_path: Path) -> bool:
 def _format_task_dir(base: Path, idx: int, width: int = 6) -> Path:
     suffix = uuid.uuid4().hex[:8]
     return base / f"task_{idx:0{width}d}_{suffix}"
+
+
+def _generated_py_looks_network_dependent(code: str) -> bool:
+    """Reject pytest source that still assumes DNS or *.example hosts."""
+    return text_suggests_external_network(code)
 
 def _save_task_bundle(
     task_dir: Path,
@@ -109,6 +115,21 @@ def _generate_batch(cfg: AsyncBatchConfig, batch_count: int) -> List[Optional[Pa
         print("No task templates generated")
         return []
 
+    # Drop tasks that still mention placeholder hosts / external DNS (model drift).
+    before = len(task_templates)
+    task_templates = [
+        t
+        for t in task_templates
+        if not text_suggests_external_network(t.get("description", ""))
+        and not text_suggests_external_network(t.get("truth", ""))
+    ]
+    if before and len(task_templates) < before and cfg.verbose:
+        print(f"Filtered {before - len(task_templates)} task templates (network/DNS placeholders in text)")
+
+    if not task_templates:
+        print("No task templates left after local-only filtering")
+        return []
+
     descriptions: List[str] = [t.get("description", "").strip() for t in task_templates]
     truths: List[str] = [t.get("truth", "").strip() for t in task_templates]
 
@@ -135,13 +156,24 @@ def _generate_batch(cfg: AsyncBatchConfig, batch_count: int) -> List[Optional[Pa
         max_concurrency=cfg.max_concurrency,
     )
 
-    # get valid indices from init_tests
-    valid_indices = [i for i, test in enumerate(init_tests) if test]
+    # get valid indices from init_tests (syntax-ok and local-only)
+    parse_ok = [i for i, test in enumerate(init_tests) if test]
+    valid_indices = [
+        i for i in parse_ok if not _generated_py_looks_network_dependent(init_tests[i])
+    ]
+    if cfg.verbose and len(parse_ok) > len(valid_indices):
+        print(
+            f"Dropped {len(parse_ok) - len(valid_indices)} initial tests "
+            "(network/DNS or *.example placeholders in generated pytest)"
+        )
     descriptions = [descriptions[i] for i in valid_indices]
     truths = [truths[i] for i in valid_indices]
     init_tests = [init_tests[i] for i in valid_indices]
 
     print(f"Generated {len(init_tests)} initial tests")
+    if not init_tests:
+        print("No initial tests left after local-only filtering")
+        return []
 
     # 3) Final tests (batch)
     print(f"Generating {len(descriptions)} final tests with {cfg.max_concurrency} concurrency")
@@ -153,13 +185,28 @@ def _generate_batch(cfg: AsyncBatchConfig, batch_count: int) -> List[Optional[Pa
         max_concurrency=cfg.max_concurrency,
     )
 
-    print(f"Generated {len(final_tests)} final tests")
-    valid_indices = [i for i, test in enumerate(final_tests) if test]
+    parse_ok = [i for i, test in enumerate(final_tests) if test]
+    valid_indices = [
+        i for i in parse_ok if not _generated_py_looks_network_dependent(final_tests[i])
+    ]
+    if cfg.verbose and len(parse_ok) > len(valid_indices):
+        print(
+            f"Dropped {len(parse_ok) - len(valid_indices)} final tests "
+            "(network/DNS or *.example placeholders in generated pytest)"
+        )
+    n_final_resp = len(final_tests)
+    print(
+        f"Generated {len(valid_indices)} final tests"
+        + (f" ({n_final_resp - len(valid_indices)} dropped: invalid code or empty)" if len(valid_indices) < n_final_resp else "")
+    )
     descriptions = [descriptions[i] for i in valid_indices]
     truths = [truths[i] for i in valid_indices]
     init_tests = [init_tests[i] for i in valid_indices]
     final_tests = [final_tests[i] for i in valid_indices]
 
+    if not final_tests:
+        print("No final tests left after local-only filtering")
+        return []
 
     # 4) Apptainer def – single shot per item, then build/test locally
     print(f"Generating {len(descriptions)} defs with {cfg.max_concurrency} concurrency")
@@ -255,6 +302,12 @@ def parse_args(argv: Optional[List[str]] = None) -> AsyncBatchConfig:
     ap.add_argument("--solution-temperature", type=float, default=1.0)
     ap.add_argument("--batch-size", type=int, default=100)
     ap.add_argument("--max-concurrency", type=int, default=128)
+    ap.add_argument(
+        "--max-tokens",
+        type=int,
+        default=4096,
+        help="Per-completion token limit (test/def steps emit full files; 1024 often truncates and yields 0 saved tasks)",
+    )
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--quiet", action="store_true")
 
@@ -266,6 +319,7 @@ def parse_args(argv: Optional[List[str]] = None) -> AsyncBatchConfig:
         num_tasks=args.num_tasks,
         out_dir=args.out_dir,
         model=args.model,
+        max_tokens=max(256, args.max_tokens),
         task_temperature=args.task_temperature,
         test_temperature=args.test_temperature,
         solution_temperature=args.solution_temperature,

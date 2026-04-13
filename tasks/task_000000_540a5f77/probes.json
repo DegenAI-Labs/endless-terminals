@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "task_id": "task_000000_540a5f77",
+  "ground_truth_notes": "Ground truths match test_final_state.py: backup.sql exact canonical dump and size 1354 bytes; transfer_complete.txt single-line marker. Probes only read text paths under default_paths.",
+  "reference_w": {
+    "description": "Files exposed to the probe model as file excerpts (cat) for answering verification questions.",
+    "default_paths": [
+      "/home/user/_sim_remote/backup.sql",
+      "/home/user/_sim_remote/transfer_complete.txt"
+    ]
+  },
+  "probes": [
+    {
+      "id": "backup_sql_byte_size",
+      "question": "How many bytes is the file /home/user/_sim_remote/backup.sql? Answer with a single integer.",
+      "answer_type": "integer",
+      "ground_truth": 1354,
+      "visibility": "full_backup_sql",
+      "match": { "type": "strip_eq" }
+    },
+    {
+      "id": "transfer_complete_line",
+      "question": "What is the exact full text content of /home/user/_sim_remote/transfer_complete.txt (the whole file as one line)?",
+      "answer_type": "exact_string",
+      "ground_truth": "Database transfer completed at 2023-10-15T10:00:00Z",
+      "visibility": "full_transfer_marker",
+      "match": { "type": "strip_eq" }
+    },
+    {
+      "id": "backup_first_line",
+      "question": "What is the first line of /home/user/_sim_remote/backup.sql (no leading/trailing context)?",
+      "answer_type": "exact_string",
+      "ground_truth": "-- SQLite schema dump",
+      "visibility": "full_backup_sql",
+      "match": { "type": "strip_eq" }
+    },
+    {
+      "id": "insert_statement_count",
+      "question": "In /home/user/_sim_remote/backup.sql, how many lines contain INSERT INTO \"sensor_data\"? Answer with a single integer.",
+      "answer_type": "integer",
+      "ground_truth": 3,
+      "visibility": "full_backup_sql",
+      "match": { "type": "strip_eq" }
+    },
+    {
+      "id": "create_table_name",
+      "question": "In the CREATE TABLE line in /home/user/_sim_remote/backup.sql, what is the table name inside the double quotes (answer with that name only)?",
+      "answer_type": "exact_string",
+      "ground_truth": "sensor_data",
+      "visibility": "full_backup_sql",
+      "match": { "type": "strip_eq" }
+    }
+  ]
+}

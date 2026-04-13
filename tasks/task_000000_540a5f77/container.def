@@ -1,0 +1,40 @@
+Bootstrap: localimage
+From: /projects/bglk/myu8/endless-terminals/ubuntu_22.04.sif
+
+%post
+    # Install required packages
+    apt-get update
+    apt-get install -y sqlite3 python3-pip
+
+    # Create user home directory
+    useradd -u 1000 -d /home/user -m user
+    chown -R 1000:1000 /home/user
+
+    # Create initial SQLite database with sample data
+    sqlite3 /home/user/iotsensors.db <<EOF
+CREATE TABLE sensor_data (
+    timestamp TEXT,
+    temperature REAL,
+    humidity REAL
+);
+INSERT INTO sensor_data VALUES
+('2023-10-15 08:00:00', 23.4, 45.6),
+('2023-10-15 08:15:00', 24.1, 46.3),
+('2023-10-15 08:30:00', 22.8, 44.9);
+EOF
+
+    # Create simulated remote directory with proper permissions
+    mkdir -p /home/user/_sim_remote
+    chown -R 1000:1000 /home/user/_sim_remote
+    chmod 755 /home/user/_sim_remote
+
+    # Install pytest for testing
+    pip3 install pytest
+
+%environment
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    HOME=/home/user
+
+%labels
+    AUTHOR "Container Builder"
+    PURPOSE "SQLite database export task simulation"

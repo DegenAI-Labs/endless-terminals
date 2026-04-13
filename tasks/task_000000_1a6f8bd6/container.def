@@ -1,0 +1,13 @@
+Bootstrap: localimage
+From: /projects/bglk/myu8/endless-terminals/ubuntu_22.04.sif
+
+%post
+    apt-get update && apt-get install -y openssh-client sshpass python3-pip
+    pip3 install pytest
+    useradd -m user
+    chown -R user:user /home/user
+
+%environment
+    chmod 755 /home/user
+
+    HOME=/home/user

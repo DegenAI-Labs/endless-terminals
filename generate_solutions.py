@@ -19,6 +19,34 @@ from generate_tasks import _safe_write_text
 from generator.sample_solutions import run_n_solutions
 
 
+def _validate_sif_or_raise(sif_path: Path) -> None:
+    """Fail fast if Apptainer cannot open the image (avoids obscure errors mid-init)."""
+    if not sif_path.is_file():
+        raise RuntimeError(
+            f"Missing SIF: {sif_path}. Build with:\n"
+            f"  cd {sif_path.parent} && apptainer build container.sif container.def"
+        )
+    try:
+        r = subprocess.run(
+            ["apptainer", "inspect", str(sif_path)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except FileNotFoundError:
+        return
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"apptainer inspect timed out for {sif_path}") from e
+    if r.returncode != 0:
+        tail = ((r.stderr or "") + (r.stdout or ""))[-4000:]
+        raise RuntimeError(
+            f"Apptainer rejected {sif_path} (corrupt image, wrong format, or copy truncated). "
+            "Rebuild a plain SIF from the def (do not use a run-singularity wrapper as the saved file):\n"
+            f"  cd {sif_path.parent} && rm -f container.sif && apptainer build container.sif container.def\n"
+            f"apptainer inspect output:\n{tail}"
+        )
+
+
 @dataclass
 class SolutionConfig:
     """Configuration for running solutions on tasks."""
@@ -32,6 +60,7 @@ class SolutionConfig:
     num_tasks: int = 1
     start_at: int = 0
     num_pool_workers: int = 128
+    max_instance_init_workers: int = 4
     workers: int = 1
     force_build: bool = False
     vllm: bool = False
@@ -108,6 +137,8 @@ def process_task(task_dir: str, cfg: SolutionConfig):
     pass_at_k = None
 
     try:
+        _validate_sif_or_raise(sif_path)
+
         print(f"[{task_dir.name}] Running {cfg.num_solutions} solutions...")
         solutions_dir.mkdir(exist_ok=True)
 
@@ -168,6 +199,12 @@ def parse_args(argv: Optional[List[str]] = None) -> SolutionConfig:
     )
     ap.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     ap.add_argument("--num-pool-workers", type=int, default=128, help="Number of pool workers")
+    ap.add_argument(
+        "--max-instance-init-workers",
+        type=int,
+        default=4,
+        help="Max concurrent Apptainer instance starts (lower avoids startup contention)",
+    )
     ap.add_argument(
         "--workers", type=int, default=1, help="Number of concurrent tasks to process"
     )

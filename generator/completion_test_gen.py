@@ -37,7 +37,8 @@ Rules:
 * Failures must clearly explain **what is still wrong**.
 * When you check for files or directories, always use their *absolute* paths exactly as given (no relative paths).
 * Ensure that the the state of the OS matches the truth after the task is completed.
-* Write the code in a fenced code block that can be parsed to get a single python file."""
+* Write the code in a fenced code block that can be parsed to get a single python file.
+* LOCAL ONLY: The container has no outbound network and no DNS for placeholder domains. Do **not** call ssh/scp/rsync/curl against *.example.com or any external host; do not rely on DNS. Verify the final state using pathlib, os.path, and open() on absolute paths under /home/user. If the story involves a remote machine, assert on the simulated directory tree under /home/user/_sim_remote/... (same paths the student was told to use)."""
 
 USER_TEMPLATE = """The task description is: {task_description}
 The truth value is: {truth}

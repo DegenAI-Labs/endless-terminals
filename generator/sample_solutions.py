@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import re
 import json
+import shlex
+import uuid
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from math import comb
@@ -14,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from generator import chat_completion_batch
+from generator.probe_claims import append_claim_event, load_probes
 
 from generator.env import InteractiveContainerEnvironment as ContainerEnvironment  
 
@@ -39,6 +42,10 @@ Detailed Instructions:
 
 USER_TEMPLATE = """{task_description}"""
 
+PROBE_SYSTEM_MESSAGE = """You are answering short verification questions about a Linux task environment.
+Use only the file excerpts provided below (if any) plus the question. Reply with the direct answer only:
+one line when possible, no XML tags, no shell commands."""
+
 DONE_RE = re.compile(r"<action>\s*done\s*</action>", flags=re.IGNORECASE)
 CMD_RE = re.compile(r"<command>\s*(.*?)\s*</command>", flags=re.IGNORECASE | re.DOTALL)
 
@@ -57,6 +64,96 @@ def _extract_action(response: str) -> Dict[str, Optional[str]]:
     return {"type": "invalid", "command": None}
 
 
+def _probe_file_context(env: ContainerEnvironment, paths: List[str]) -> str:
+    """Read optional paths inside the container for probe prompts (paths must be trusted)."""
+    if not paths:
+        return "(No file excerpts; answer from the question only.)"
+    chunks: List[str] = []
+    for raw in paths:
+        p = shlex.quote(raw)
+        ok, out = env.exec(f"test -r {p} && cat {p} 2>/dev/null || echo '[missing or unreadable]'")
+        chunks.append(f"--- {raw} ---\n{out.strip()}")
+    return "\n\n".join(chunks)
+
+
+def _run_probes_after_episode(
+    *,
+    task_path: str,
+    task_id: str,
+    envs: List[ContainerEnvironment],
+    num_solutions: int,
+    num_steps: int,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    verbose: bool,
+) -> None:
+    """If probes.json exists next to task.json, ask each probe per rollout and append to claim_log.jsonl."""
+    tdir = Path(task_path).resolve().parent
+    probes_path = tdir / "probes.json"
+    if not probes_path.is_file():
+        return
+    try:
+        doc = load_probes(probes_path)
+    except (OSError, json.JSONDecodeError) as e:
+        if verbose:
+            print(f"⚠️  Skipping probes: could not load {probes_path}: {e}")
+        return
+    probes: List[Dict[str, Any]] = doc.get("probes") or []
+    if not probes:
+        return
+    ref = doc.get("reference_w") or {}
+    paths: List[str] = list(ref.get("default_paths") or [])
+    log_path = tdir / "claim_log.jsonl"
+    run_id = uuid.uuid4().hex[:16]
+    probe_max_tokens = min(512, max(128, max_tokens))
+
+    if verbose:
+        print(f"Running {len(probes)} probes × {num_solutions} rollouts → {log_path}")
+
+    for probe in probes:
+        pid = probe.get("id") or "unknown"
+        q = (probe.get("question") or "").strip()
+        batch_msgs: List[List[Dict[str, str]]] = []
+        for i in range(num_solutions):
+            ctx = _probe_file_context(envs[i], paths)
+            user = f"{ctx}\n\nQuestion: {q}"
+            batch_msgs.append(
+                [
+                    {"role": "system", "content": PROBE_SYSTEM_MESSAGE},
+                    {"role": "user", "content": user},
+                ]
+            )
+        try:
+            raw = chat_completion_batch(
+                batch_msgs,
+                model=model,
+                temperature=temperature,
+                max_tokens=probe_max_tokens,
+                num_completions=1,
+                max_concurrency=len(batch_msgs),
+            )
+        except Exception as e:
+            if verbose:
+                print(f"⚠️  Probe batch failed for {pid}: {e}")
+            continue
+        for i, resp in enumerate(raw):
+            text = ""
+            try:
+                text = (resp.choices[0].message.content or "").strip()
+            except (AttributeError, IndexError):
+                pass
+            append_claim_event(
+                log_path,
+                task_id=task_id,
+                run_id=run_id,
+                step=num_steps,
+                probe_id=str(pid),
+                claim_raw=text,
+                extra={"rollout_index": i},
+            )
+
+
 def run_n_solutions(
     num_solutions: int,
     container_sif_path: str,
@@ -71,6 +168,7 @@ def run_n_solutions(
     save_dir: Optional[str] = None,
     verbose: bool = True,
     num_pool_workers: int = 128,
+    max_instance_init_workers: int = 4,
     run_initial_tests: bool = True
 ) -> Dict[str, Any]:
     """Produce n interactive solutions sequentially for the given task."""
@@ -111,10 +209,15 @@ def run_n_solutions(
             )
             ok = env.initialize(run_initial_tests=False)
             if not ok:
-                raise RuntimeError(f"Failed to initialize environment #{i}")
+                detail = getattr(env, "_last_init_error", None) or "unknown error"
+                raise RuntimeError(
+                    f"Failed to initialize environment #{i}: {detail}"
+                )
             return env
 
-        with ThreadPoolExecutor(max_workers=num_pool_workers) as executor:
+        # Apptainer instance start + PTY shell is heavy; avoid launching all at once.
+        init_workers = max(1, min(num_solutions, max_instance_init_workers))
+        with ThreadPoolExecutor(max_workers=init_workers) as executor:
             envs = list(executor.map(_init_env, range(num_solutions)))
         end_time = time.time()
         print(f"environments initialized in {end_time - start_time} seconds")
@@ -218,6 +321,19 @@ def run_n_solutions(
                 is_done = [True] * num_solutions
                 not_done_idx = []
                 break
+
+        task_id = task_data.get("name") or Path(task_path).resolve().parent.name
+        _run_probes_after_episode(
+            task_path=task_path,
+            task_id=str(task_id),
+            envs=envs,
+            num_solutions=num_solutions,
+            num_steps=num_steps,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            verbose=verbose,
+        )
 
         start_time = time.time()
         # Run final tests and collect results (in parallel, preserve order)

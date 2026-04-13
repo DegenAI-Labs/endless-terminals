@@ -1,0 +1,153 @@
+
+SUMMARY:
+
+The system has two layers. Offline, a script (generate_tasks.py) talks to a vLLM server 
+and writes each task’s instructions (task.json), before/after checks 
+(test_initial_state.py, test_final_state.py), and a container recipe (container.def). 
+That recipe is built into a runnable Apptainer image (container.sif). At evaluation time, 
+another script (generate_solutions.py) uses the same kind of LLM to drive an agent inside 
+that container (model + terminal/shell), so the model can run commands in an isolated environment. 
+When the run ends, pytest on the final test decides pass or fail. Separately and optionally, 
+if probes.json is present, short follow-up questions are scored against ground truth; answers are 
+appended to claim_log.jsonl and can be summarized offline with eval_probe_claims.py—that path 
+measures claimed facts vs. truth, not the same thing as the binary task success from pytest.
+
+
+
+
+generate_tasks.py requires that vLLM is running, basically that something must be serving
+the API at localhost:8000/v1
+
+vLLM cannot be simply run on the login node cause there's no usable GPU
+-on Delta's login node, there is normally no GPU attached to the session
+
+Need to run vLLM inside a GPU job on a compute node
+-request an interactive GPU allocation
+
+
+STEPS TO RUN:
+
+1. (SKIP THIS STEP, RESULTS IN CUDA OOM)
+(from the login node: request GPUs)
+salloc --partition=gpuA100x4-interactive -A bglk-delta-gpu \
+  --nodes=1 --gpus-per-node=1 --cpus-per-task=16 --mem=64G --time=1:00:00
+
+wait until slurm gives a job id and returns a shell
+
+(open a shell on the compute node with that GPU)
+srun --jobid=$SLURM_JOB_ID --gpus-per-node=1 --cpus-per-task=16 --mem=64G --pty bash
+
+(load python and go to the repo)
+module load python/3.13.5-gcc13.3.1
+cd /projects/bglk/myu8/endless-terminals
+export PATH="$HOME/.local/bin:$PATH"
+
+(start vLLM)
+./scripts/launch_vllm_server.sh
+
+2. (START HERE)
+*CUDA OOM from step 1 above while loading weights
+*GPU is 40GB
+*Qwen3-32B is 64GB in weights alone
+
+(tensor-parallel across 2 GPUs)
+
+salloc --partition=gpuA100x4-interactive -A bglk-delta-gpu \
+  --nodes=1 --gpus-per-node=2 --cpus-per-task=32 --mem=128G --time=1:00:00
+
+srun --jobid=$SLURM_JOB_ID --gpus-per-node=2 --cpus-per-task=32 --mem=128G --pty bash
+
+./scripts/launch_vllm_server.sh 2 1
+
+(OR try to use an 80GB GPU)
+
+
+3.
+(test to ensure it worked)
+in another terminal:
+squeue -u $USER
+srun --jobid=<jobid> --overlap --pty bash
+
+python3 generate_tasks.py --num-tasks 10 --out-dir ./tasks --model Qwen/Qwen3-32B --max-concurrency 4 --max-tokens 4096
+(doesn't guarantee 10 tasks will be saved, 
+10 is just how many to try; usually a bunch get
+filtered out during the generation process)
+
+python generate_solutions.py --tasks-dir ./tasks --num-solutions 16 --model Qwen/Qwen3-32B
+(this is pass@16 - try the task 16 times with sampling)
+(it writes outputs under each task's solutions/ directory)
+
+
+* Apptainer is sort of like Docker but often used for clusters
+* images are often built as single files (.sif) that are easy to copy/run
+* An apptainer def (container.def) is the build recipe, like a Dockerfile
+
+
+* What generate_tasks does:
+-README uses Qwen/Qwen3-32B = around 60 GB
+-x = num-tasks
+-generates x task templates
+-generates x initial tests
+-generates x final tests
+-generates x defs (Apptainer def)
+
+-each task generates:
+-task.json, test_initial_state.py, test_final_state.py, container.def, and container.sif
+-container.def is a definition file; a text file that says how to build a container image;
+  -how to construct the sandbox for that task
+-container.sif is a single file that is the actual runnable image
+
+* the pipeline only enforces mechanical checks. It does not guarantee good difficulty or clarity
+* we should probably spot-check each task manully (or semi-automated with an LLM)
+
+
+
+* How task_000000_ab3a0090 works:
+
+-task.json description - what the agent is told to do
+  -sync access.log from logs.example.com to the local machine
+  -filter 404, extract IPs, count, top 5, descending frequency
+  -output path: /home/user/analysis/404_ip_report.text, lines like IP: COUNT
+-task.json truth - hidden from the agent; used for generation / reference
+  -fake server, example log lines, etc.
+-container.def - what the image actually contains
+-test_initial_state.py - verifies the state before the agent acts
+-test_final_state.py - success criteria after the agent
+
+
+
+* Adding probes (HalluWorld-style: W = observable world, C = model answers, G = ground truth)
+
+What was added in the repo:
+- tasks/task_000000_ab3a0090/probes.json — defines probe questions, answer_type (integer / exact_string),
+  ground_truth (G), and visibility (annotation for W per probe). Aligned with test_final_state.py +
+  canonical log counts in task truth.
+- generator/probe_claims.py — append_claim_event() writes one JSON line per claim to a log file;
+  load_probes / read_claim_events / summarize_run_against_probes for scoring.
+- scripts/eval_probe_claims.py — reads probes.json + claim_log.jsonl, prints accuracy (and --json).
+  Prints a note if the log file is missing or empty.
+
+Wiring (updated):
+- generator/sample_solutions.run_n_solutions: after the main agent loop, if task_dir/probes.json
+  exists, runs each probe for each rollout (batched via chat_completion_batch). Injects file excerpts
+  from reference_w.default_paths read inside each container, then append_claim_event → claim_log.jsonl
+  next to task.json. extra.rollout_index identifies the rollout.
+- eval_probe_claims.py: use --rollout-index N to score one rollout when num-solutions > 1 (default 0).
+
+claim_log.jsonl:
+- Created on first append_claim_event(..., log_path=...). Each line is JSON with ts, task_id,
+  run_id, step, probe_id, claim_raw.
+
+Quick eval after you have a log:
+  python3 scripts/eval_probe_claims.py \
+    --probes tasks/task_000000_ab3a0090/probes.json \
+    --log tasks/task_000000_ab3a0090/claim_log.jsonl
+
+Relation to the rest:
+- pytest final tests = task success (binary). Probes = separate C vs G metrics for the paper;
+  optional and parallel to the main solution loop.
+
+* currently probes are not a live hallucination detector during the run
+* they're post-hoc checks
+
+

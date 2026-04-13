@@ -24,6 +24,7 @@ Rules:
 * When you test for a file or directory, test for the full path to the file or directory, not just relative path.
 * DO NOT test for any of the output files or directories.
 * The home path is /home/user.
+* LOCAL ONLY: The container has no outbound network and no DNS for fake hostnames. Do not use subprocess to call ssh, scp, rsync to remote hosts, curl to the internet, or assert on *.example.com. Check state with pathlib/os/open() on absolute paths only. If the task mentions a remote server, tests should target the simulated tree under /home/user/_sim_remote/... as described in the task/truth.
 """
 
 USER_TEMPLATE = """The task description is: {task_description}

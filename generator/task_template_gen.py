@@ -11,6 +11,7 @@ import sys
 sys.path.insert(0, str(Path().resolve()))
 
 from generator import chat_completion_batch
+from generator.local_only import strip_model_reasoning_preamble
 
 SYSTEM_MSG = """You are creating realistic Linux-terminal tasks for training an AI agent.
 
@@ -206,7 +207,9 @@ def random_user_msg() -> str:
         f"Scenario: {context}. "
         "Be very specific about the output format in the task description that the automated test will check. "
         "Write the task description in a way that a user might ask an AI assistant. "
-        "The task should be a realistic end-to-end scenario that an AI agent could perform in a Linux terminal."
+        "The task should be a realistic end-to-end scenario that an AI agent could perform in a Linux terminal. "
+        "The task must be verifiable using only local filesystem state under /home/user; represent any remote "
+        "or server-side files under /home/user/_sim_remote/ with absolute paths."
     )
 
 
@@ -256,13 +259,21 @@ def generate_templates_batch(
 def parse_template(raw: str) -> dict:
     """Convert the raw XML *raw* into a structured ``dict``."""
 
+    raw = strip_model_reasoning_preamble(raw)
+
     # Extract the task description template
-    template = re.search(r"<task>(.*?)</task>", raw, re.DOTALL).group(1).strip()
+    m_task = re.search(r"<task>(.*?)</task>", raw, re.DOTALL)
+    if not m_task:
+        raise ValueError("No task description found in the response.")
+    template = m_task.group(1).strip()
     if not template:
         raise ValueError("No task description found in the response.")
 
     # Extract ground-truth section (optional)
-    truth_data = re.search(r"<truth>(.*?)</truth>", raw, re.DOTALL).group(1).strip()
+    m_truth = re.search(r"<truth>(.*?)</truth>", raw, re.DOTALL)
+    if not m_truth:
+        raise ValueError("No truth data found in the response.")
+    truth_data = m_truth.group(1).strip()
     if not truth_data:
         raise ValueError("No truth data found in the response.")
 

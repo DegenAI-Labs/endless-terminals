@@ -1,0 +1,65 @@
+Bootstrap: localimage  
+From: /projects/bglk/myu8/endless-terminals/ubuntu_22.04.sif
+
+%post  
+    # Install required packages  
+    apt-get update && apt-get install -y nginx curl python3-pip  
+    pip3 install pytest  
+
+    # Create user-specific directories  
+    mkdir -p /home/user/services  
+    mkdir -p /home/user/logs  
+
+    # Set permissions for user-writable directories  
+    chmod 755 /home/user/logs  
+
+    # Create initial Nginx configuration file  
+    cat <<EOF > /home/user/services/nginx.conf  
+user  nginx;  
+worker_processes  auto;  
+
+error_log  /var/log/nginx/error.log notice;  
+pid        /var/run/nginx.pid;  
+
+events {  
+    worker_connections  1024;  
+}  
+
+http {  
+    include       /etc/nginx/mime.types;  
+    default_type  application/octet-stream;  
+
+    log_format  main  '\$remote_addr - \$remote_user [\$time_local] "\$request" '  
+                      '\$status \$body_bytes_sent "\$http_referer" '  
+                      '"\$http_user_agent" "\$http_x_forwarded_for"';  
+
+    access_log  /var/log/nginx/access.log  main;  
+
+    sendfile        on;  
+    keepalive_timeout  65;  
+
+    server {  
+        listen 80;  
+        server_name  localhost;  
+
+        location / {  
+            root   /usr/share/nginx/html;  
+            index  index.html index.htm;  
+            try_files \$uri \$uri/ =404;  
+        }  
+
+        location /health {  
+            return 200 'OK';  
+        }  
+    }  
+}  
+EOF  
+
+    # Ensure files are user-accessible  
+    chown -R user:user /home/user/services /home/user/logs  
+
+%environment  
+    # No HOME override, as specified  
+
+%runscript  
+    echo "Container initialized for Nginx configuration task"

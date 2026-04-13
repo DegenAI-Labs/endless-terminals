@@ -1,6 +1,7 @@
 *.sif
 *.backup
-tasks/
+# tasks/
+*.sif
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

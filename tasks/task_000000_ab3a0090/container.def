@@ -1,0 +1,27 @@
+Bootstrap: localimage
+From: /projects/bglk/myu8/endless-terminals/ubuntu_22.04.sif
+
+%post
+    # Install required packages
+    apt update && apt install -y openssh-client grep gawk coreutils python3-pip
+
+    # Create user and home directories
+    useradd -m -s /bin/bash user
+
+    # Create required directories with correct permissions
+    mkdir -p /home/user/logs
+    mkdir -p /home/user/analysis
+    chmod 755 /home/user/analysis
+
+    # Set ownership for non-root user access
+    chown -R user:user /home/user
+
+    # Install pytest for testing
+    pip3 install pytest
+
+%environment
+    # No HOME override - uses Apptainer's default binding
+
+%labels
+    AUTHOR YourName
+    DESCRIPTION Container for log analysis task with required tools and directory structure

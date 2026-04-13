@@ -28,7 +28,9 @@ The agent will not have root access. So make sure that the right permissions are
 Always use this image: docker://ubuntu:22.04
 To add it to the def file, use:
 Bootstrap: localimage
-From: ./ubuntu_22.04.sif"""
+From: ./ubuntu_22.04.sif
+
+OFFLINE / LOCAL ONLY: There is no outbound network and no DNS for fake domains inside the image. Do not configure /etc/hosts for *.example.com or expect real SSH servers. If the task or tests refer to a "remote" host or second account, create the matching directory tree under /home/user/_sim_remote/ in %post (absolute paths), owned by uid 1000, so pytest can read files locally. Do not install or start sshd unless the task explicitly requires the openssh server for localhost-only tests (prefer simulated directories)."""
 
 BASE_USER_TEMPLATE = """
 Using the task description template and pytest failures below, output a complete
@@ -46,7 +48,7 @@ Here are the tests that will be run on the container:
 Previous failures (may be empty):
 {failures}
 
-Respond with the Apptainer `.def` file only. You should think step by step and then write the file. The file should be valid and buildable.
+Respond with the Apptainer `.def` file only (no reasoning tags). Write the file; it must be valid and buildable.
 Make sure that you create the right files and directories for the task.
 Eg: for a csv task you will have to create a csv file. For a process cleanup task you will have to create processes.
 Don't include the tests in the response or copy a test file.
@@ -55,6 +57,8 @@ Don't create / touch empty files for the agent.
 Remember to install pytest in the container.
 The home path is /home/user.
 Don't override HOME in the %environment section; let Apptainer bind the host $HOME.
+
+If the task involves syncing or copying to a "remote" server, implement that server as directories under /home/user/_sim_remote/<name>/ created in %post, not as a real network host.
 """
 
 
@@ -83,13 +87,41 @@ def build_and_test(def_template: str, test_py: str) -> tuple[bool, str]:
         test_file = td_path / "test_initial_state.py"
         test_file.write_text(test_py)
 
+        # Definitions use `From: ./ubuntu_22.04.sif` (see SYSTEM_MSG). Copy the base
+        # image from the repo root (from ./scripts/get_ubuntu_sif.sh) into the build dir.
+        repo_root = Path(__file__).resolve().parents[1]
+        base_sif = repo_root / "ubuntu_22.04.sif"
+        if base_sif.is_file():
+            shutil.copy(base_sif, td_path / "ubuntu_22.04.sif")
+        else:
+            print(
+                f"Missing {base_sif} — run from repo root: apptainer pull ubuntu_22.04.sif docker://ubuntu:22.04"
+            )
+
         # ------------------------------------------------------------------
         # 2. Build the container image from the .def file
         # ------------------------------------------------------------------
         sif_path = td_path / "img.sif"
-        build_rc = subprocess.run(["apptainer", "build", str(sif_path), str(def_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180).returncode
-        if build_rc:
-            print(f"Apptainer build failed: {build_rc}")
+        # Prefer --fakeroot for unprivileged builds; fall back if this Apptainer rejects the flag.
+        def _run_build(use_fakeroot: bool):
+            cmd = ["apptainer", "build"]
+            if use_fakeroot:
+                cmd.append("--fakeroot")
+            cmd.extend([str(sif_path), str(def_path)])
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+        build_proc = _run_build(True)
+        combined_err = (build_proc.stderr or "") + (build_proc.stdout or "")
+        if build_proc.returncode != 0 and (
+            "unknown flag" in combined_err.lower() or "invalid choice" in combined_err.lower()
+        ):
+            build_proc = _run_build(False)
+        if build_proc.returncode != 0:
+            err = (build_proc.stderr or "") + "\n" + (build_proc.stdout or "")
+            tail = err.strip()[-4000:]
+            print(f"Apptainer build failed: {build_proc.returncode}")
+            if tail:
+                print(tail)
             return False, "Apptainer build failed"
 
         # copy the test file to the container at /home/agent/test_initial_state.py
@@ -129,6 +161,37 @@ def build_and_test(def_template: str, test_py: str) -> tuple[bool, str]:
         return proc.returncode == 0, proc.stdout + proc.stderr
 
 
+def _strip_llm_reasoning_and_preamble(text: str) -> str:
+    """Remove Qwen/reasoning tags and chatter before the real .def header.
+
+    Apptainer parses the first lines as ``Key: value`` headers; stray lines like
+    ``<think>`` cause: failed to parse deffile header.
+    """
+    # Qwen3 ``<think>``...``</think>`` blocks; Apptainer treats bare ``<tag>`` lines as headers
+    for pat in (
+        r"<think>[\s\S]*?</think>",
+        r"<think>[\s\S]*?</think>",
+    ):
+        text = re.sub(pat, "", text, flags=re.IGNORECASE | re.DOTALL)
+
+    lines = text.replace("\r\n", "\n").strip().split("\n")
+    kept: List[str] = []
+    for line in lines:
+        s = line.strip()
+        if re.match(r"^<[^>]+>\s*$", s):
+            continue
+        kept.append(line)
+    text = "\n".join(kept).strip()
+    lines = text.split("\n") if text else []
+
+    start_hints = ("bootstrap:", "from:", "mirrorurl:", "registry", "namespace")
+    for i, line in enumerate(lines):
+        low = line.strip().lower()
+        if low.startswith(start_hints) or (line.strip().startswith("%") and len(line.strip()) > 1):
+            return "\n".join(lines[i:]).strip()
+    return text
+
+
 def parse_def_template(def_template: str) -> str:
     """
     Clean up the raw response from the language model and return a valid
@@ -149,6 +212,8 @@ def parse_def_template(def_template: str) -> str:
     match = fence_re.search(cleaned)
     if match:
         cleaned = match.group("code").strip()
+
+    cleaned = _strip_llm_reasoning_and_preamble(cleaned)
 
     # Remove any common leading indentation
     cleaned = textwrap.dedent(cleaned).strip()

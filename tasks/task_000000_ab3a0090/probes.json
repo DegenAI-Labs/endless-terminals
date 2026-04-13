@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "task_id": "task_000000_ab3a0090",
+  "ground_truth_notes": "Aligned with test_final_state.py and the canonical log lines in task.json truth. access.log is assumed to contain exactly five 404 lines matching the published example (three distinct IPs).",
+  "reference_w": {
+    "description": "Reference world for visibility labels: what the agent is allowed to see when answering (tune for paper: full_file, partial_tail, metadata_only, etc.).",
+    "default_paths": [
+      "/home/user/logs/access.log",
+      "/home/user/logs/sync_verified.log",
+      "/home/user/analysis/404_ip_report.txt"
+    ]
+  },
+  "probes": [
+    {
+      "id": "report_line1",
+      "question": "What is the full first line of /home/user/analysis/404_ip_report.txt (the top line of the IP frequency report)?",
+      "answer_type": "exact_string",
+      "ground_truth": "123.45.67.89: 2",
+      "visibility": "full_report_file",
+      "match": { "type": "strip_eq" }
+    },
+    {
+      "id": "report_line_count",
+      "question": "How many non-empty lines does /home/user/analysis/404_ip_report.txt contain?",
+      "answer_type": "integer",
+      "ground_truth": 3,
+      "visibility": "full_report_file",
+      "match": { "type": "integer_eq" }
+    },
+    {
+      "id": "sync_status_line",
+      "question": "What is the exact third line of /home/user/logs/sync_verified.log?",
+      "answer_type": "exact_string",
+      "ground_truth": "Synchronization status: SUCCESS",
+      "visibility": "full_sync_log",
+      "match": { "type": "strip_eq" }
+    },
+    {
+      "id": "sync_remote_timestamp",
+      "question": "After the prefix 'Remote file timestamp: ', what is the rest of that line in /home/user/logs/sync_verified.log? (Answer with only the timestamp text, e.g. YYYY-MM-DD HH:MM:SS)",
+      "answer_type": "exact_string",
+      "ground_truth": "2023-10-01 12:35:20",
+      "visibility": "full_sync_log",
+      "match": { "type": "strip_eq" }
+    },
+    {
+      "id": "count_404_lines_in_access_log",
+      "question": "How many lines in /home/user/logs/access.log contain the pattern ' 404 ' (space, 404, space) as the HTTP status field?",
+      "answer_type": "integer",
+      "ground_truth": 5,
+      "visibility": "full_access_log",
+      "match": { "type": "integer_eq" }
+    },
+    {
+      "id": "distinct_404_ips",
+      "question": "How many distinct source IP addresses appear in 404 lines in /home/user/logs/access.log for this task's canonical log?",
+      "answer_type": "integer",
+      "ground_truth": 3,
+      "visibility": "full_access_log",
+      "match": { "type": "integer_eq" }
+    }
+  ]
+}

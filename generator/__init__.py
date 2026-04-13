@@ -146,7 +146,8 @@ def parse_python_code(code: str) -> str:
     import re
     # First, look for a fenced code block – we assume the first one contains
     # the pytest file we are interested in.
-    fence_regex = re.compile(r"```(?:python)?\n(.*?)```", re.DOTALL | re.IGNORECASE)
+    # Accept ```python, ```pytest, ```, etc. (models often label fences pytest)
+    fence_regex = re.compile(r"```[a-zA-Z0-9_+-]*\n(.*?)```", re.DOTALL)
     match = fence_regex.search(code)
     if match:
         snippet = match.group(1)

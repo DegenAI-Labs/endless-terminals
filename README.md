@@ -34,10 +34,10 @@ Start a vLLM server locally before running task generation:
 Then generate tasks:
 
 ```bash
-python generate_tasks.py --num-tasks 100 --out-dir ./tasks --model Qwen/Qwen3-32B --jobs 8
+python generate_tasks.py --num-tasks 100 --out-dir ./tasks --model Qwen/Qwen3-32B --max-concurrency 8
 ```
 
-Each task generates: `task.json`, `test_initial_state.py`, `test_final_state.py`, `container.def`, and `container.sif`.
+Each task directory gets: `task.json`, `test_initial_state.py`, `test_final_state.py`, and `container.def`. A `container.sif` is **not** written by `generate_tasks.py` by default (the build is validated in a temp dir during generation). To produce SIFs under each task folder, run `python train/prepare_endless.py --task-dir ./tasks --output-dir ./data --build-sif` (or build from `container.def` yourself).
 
 ## Running Solutions
 

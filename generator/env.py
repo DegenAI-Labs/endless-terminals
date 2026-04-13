@@ -58,6 +58,7 @@ class InteractiveContainerEnvironment:
 
         # Unique marker to delimit command completion and carry exit code
         self._marker = f"__CMD_DONE__{uuid.uuid4().hex}__"
+        self._last_init_error: Optional[str] = None
 
     # ----------------------------
     # Low-level PTY I/O utilities
@@ -197,9 +198,13 @@ class InteractiveContainerEnvironment:
             # Give shell a brief moment to start up
             time.sleep(0.05)
             if self.shell_process.poll() is not None:
+                leftover = self._drain_queue()
+                self._last_init_error = (
+                    f"apptainer shell exited early (code {self.shell_process.returncode}): "
+                    f"{leftover[:2000]}"
+                )
                 if self.verbose:
                     print("Apptainer shell exited early with code:", self.shell_process.returncode)
-                leftover = self._drain_queue()
                 if leftover:
                     print("Shell start output:\n", leftover)
                 return False
@@ -215,6 +220,7 @@ class InteractiveContainerEnvironment:
             os.write(self.master_fd, (init_script + "\n").encode("utf-8"))
             _, code = self._read_until_marker(timeout=10.0)
             if code is None:
+                self._last_init_error = "Shell init timed out waiting for marker"
                 if self.verbose:
                     print("Shell init timed out.")
                 return False
@@ -226,6 +232,7 @@ class InteractiveContainerEnvironment:
 
             return True
         except Exception as e:
+            self._last_init_error = f"Failed to start shell: {e}"
             if self.verbose:
                 print(f"Failed to start shell: {e}")
             return False
@@ -289,6 +296,7 @@ class InteractiveContainerEnvironment:
 
     def initialize(self, run_initial_tests: bool = True) -> bool:
         """Initialize the container environment and validate initial state."""
+        self._last_init_error = None
         if self.verbose:
             print(f"🔧 Initializing container environment with {self.sif_path.name}...")
 
@@ -298,6 +306,7 @@ class InteractiveContainerEnvironment:
             if self.def_path.exists():
                 self.build_container()
             else:
+                self._last_init_error = "Neither SIF nor def file exists"
                 print("❌ Neither SIF nor def file exists")
                 return False
 
@@ -319,6 +328,9 @@ class InteractiveContainerEnvironment:
             print(f"🔧 Starting instance with command: {' '.join(start_cmd)}")
         start_proc = subprocess.run(start_cmd, capture_output=True, text=True)
         if start_proc.returncode != 0:
+            self._last_init_error = (start_proc.stdout + start_proc.stderr).strip() or (
+                f"apptainer instance start exited {start_proc.returncode}"
+            )
             if self.verbose:
                 print(f"❌ Instance start failed: {start_proc.stdout + start_proc.stderr}")
             return False
@@ -328,6 +340,8 @@ class InteractiveContainerEnvironment:
 
         # Start the interactive shell
         if not self._start_shell():
+            if self._last_init_error is None:
+                self._last_init_error = "Failed to start interactive shell (see verbose logs)"
             if self.verbose:
                 print("❌ Failed to start interactive shell")
             self._stop_instance()
